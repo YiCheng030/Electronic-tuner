@@ -22,8 +22,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "stdio.h"
-// #include "string.h"
-// #include "stdlib.h"
 #include "math.h"
 #include "fonts.h"
 #include "GFX_FUNCTIONS.h"
@@ -39,9 +37,16 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define FFTN 2048
+#define FFTN_half FFTN/2
+
+#define WDataQuantity FFTN/8
+#define WDataQuantity2 WDataQuantity*2
+#define WDataQuantity3 WDataQuantity*3
+#define WDataQuantity4 WDataQuantity*4
+
 #define Fs 8000.0
 #define PI 3.14159265359
-#define bin(x) sqrt(Data_real[x] * Data_real[x] + Data_imag[x] * Data_imag[x])
+#define bin(x) Data_real[x] * Data_real[x] + Data_imag[x] * Data_imag[x]
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -52,10 +57,11 @@ int16_t DMA_dual_Data[FFTN * 2 - 10]; // DMA Read dual channel data
 uint16_t Background_count = 6000;
 float Data_real[FFTN]; //real
 float Data_imag[FFTN]; //imag
-
+float W_real[WDataQuantity + 1] = {};
+float W_imag[WDataQuantity + 1] = {};
 float freq, Cents;
 uint8_t Octave, Finish = 0, Background_flag1, Background_flag2;
-int8_t schedule, Old_schedule = 0;
+int8_t schedule, Old_schedule = 0, e = 0;
 float ADCBattery, Old_ADCBattery;
 
 float C[8]  = {16.352, 32.704, 65.408, 130.816, 261.632, 523.264, 1046.528, 2093.056};
@@ -108,6 +114,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim); // timer4 內部計
 void I2S_DMA_Read(); // I2S DMA聲音數據讀取，並確認是否閒置
 void Init_FFT(int N_of_FFT); // 初始化傅立葉變換的相關變量
 void ChangeSeat(float DataInput[FFTN]); // 變址
+void W_tabular(void); // 快速傅立葉變換的W旋轉因子的建表
 void FFT(void); // 實現快速傅立葉變換的運算，使用蝶形運算（Butterfly diagram）
 void Close_FFT(void); // FFT結束後清空聲音資料
 void Hz(void); // 尋找FFT結果的第一個峰值，並計算聲音頻率
@@ -205,7 +212,7 @@ void Interface(void){
   * @note 
 **/
 void I2S_DMA_Read(void){
-  uint16_t count1, count2 = 0, BigData = 0, BigDataValve = 500;
+  uint16_t count1, count2 = 0, BigData = 0, BigDataValve = 150;
   HAL_I2S_Receive_DMA(&hi2s3, (uint16_t *)DMA_dual_Data, FFTN * 2);
   for(count1 = 0; count1 < FFTN * 2; count1++){
     if(DMA_dual_Data[count1] != 0){
@@ -216,7 +223,7 @@ void I2S_DMA_Read(void){
       count2++;
     }
   }
-  if(BigData >= 150){
+  if(BigData >= 75){
     Background_flag1 = 0; // 閒置模式關閉
     Background_flag2 = 0; // 閒置計數旗標關閉
     Background_count = 0; // 閒置計數歸零
@@ -239,6 +246,7 @@ void I2S_DMA_Read(void){
       fillTriangle(125, 42, 136, 51, 98, 100, ST7735_BLACK); //右4
       Background_flag2 = 1; // 閒置計數旗標開啟
       Background_count = 0; // 閒置計數歸零
+      Old_schedule = 0;
     }
   }
 }
@@ -297,6 +305,26 @@ void ChangeSeat(float DataInput[FFTN]){
 }
 
 /**
+  * @brief 快速傅立葉變換的W旋轉因子的建表
+  * @param angle 用於控制傅立葉變換的迭代次數
+  * @param B 表示迭代步長的一半
+  * @param J 控制計算角度
+  * @param M_of_N_FFT FFT 運算所需的迭代次數，log2(DataSize)
+  * @note
+**/
+void W_tabular(void){
+  uint16_t B, J;
+  double angle;
+  B = 1 << (M_of_N_FFT - 1);
+
+  for(J = 0; J < B / 4 + 1; J++){
+    angle = (double)J / B;
+    W_real[J] =  cos(angle * PI);
+    W_imag[J] = -sin(angle * PI);
+  }
+}
+
+/**
   * @brief 實現快速傅立葉變換的運算，使用蝶形運算（Butterfly diagram）
   * @param L 用於控制傅立葉變換的迭代次數
   * @param B 表示迭代步長的一半，用於蝶形運算中
@@ -304,7 +332,9 @@ void ChangeSeat(float DataInput[FFTN]){
   * @param n 用於迴圈操作，遍歷數據進行蝶形運算
   * @param step 表示步長，2 的 L 次方
   * @param k 表示 K 的 B（步長的一半）處的位置
-  * @param angle 用於儲存計算角度
+  * @param W_Rotary_Amplitude 計算W旋轉幅度
+  * @param W_Rotary_Position 計算W旋轉位置
+  * @param W_count 對應W表中的位置
   * @param W_real 代表蝶形運算中的旋轉因子的實部
   * @param W_imag 代表蝶形運算中的旋轉因子的虛部
   * @param Temp_XX_real 用於暫存旋轉因子實部的計算結果
@@ -313,22 +343,47 @@ void ChangeSeat(float DataInput[FFTN]){
   * @note
 **/
 void FFT(void){
-  uint16_t L = 0, B = 0, J = 0, n = 0;
-  int16_t step = 0, k = 0;
-  double angle;
-  float W_real, W_imag, Temp_XX_real, Temp_XX_imag;
+  uint16_t L = 0, B = 0, J = 0, n = 0, W_Rotary_Amplitude, W_Rotary_Position;
+  int16_t step = 0, k = 0, W_count;
+  float W_realAfter, W_imagAfter, Temp_XX_real, Temp_XX_imag;
   ChangeSeat(Data_real); // 變址
   for(L = 1; L <= M_of_N_FFT; L++){
     step = 1 << L; // 2 ^ L  
-    B = step >> 1; // B = 2 ^ （ L - 1 ）  
+    B = step >> 1; // B = 2 ^ ( L - 1 )
+    W_Rotary_Amplitude = 1 << (M_of_N_FFT - L); // 計算W旋轉幅度 // = 2 ^ (總跌代次數 - 目前跌代次數)
+    W_Rotary_Position = 0; // W旋轉位置歸零
+    W_count = 0;
     for(J = 0; J < B; J++){
-        angle = (double)J / B;
-        W_real =  cos(angle * PI);
-        W_imag = -sin(angle * PI);
+/*--------------------取得對應的W--------------------*/
+      if(W_Rotary_Position < WDataQuantity){         // 0 ~ (WDataQuantity - 1)
+        W_realAfter =  W_real[W_count];
+        W_imagAfter =  W_imag[W_count];
+        if(W_count + W_Rotary_Amplitude <= WDataQuantity)
+          W_count += W_Rotary_Amplitude;
+      }
+      else if(W_Rotary_Position < (WDataQuantity2)){   // (WDataQuantity - 1) ~ 0
+        W_realAfter = -W_imag[W_count];
+        W_imagAfter = -W_real[W_count];
+        if(W_count != 0)
+          W_count -= W_Rotary_Amplitude;
+      }
+      else if(W_Rotary_Position < WDataQuantity3){   // 0 ~ (WDataQuantity - 1)
+        W_realAfter =  W_imag[W_count];
+        W_imagAfter = -W_real[W_count];
+        if(W_count + W_Rotary_Amplitude <= WDataQuantity)
+          W_count += W_Rotary_Amplitude;
+      }
+      else{                                          // (WDataQuantity - 1) ~ 0
+        W_realAfter = -W_real[W_count];
+        W_imagAfter =  W_imag[W_count];
+        if(W_count != 0)
+          W_count -= W_Rotary_Amplitude;
+      }
+/*--------------------FFT計算--------------------*/
       for(n = J; n < FFTN; n = n + step){
         k = n + B;
-        Temp_XX_real = Data_real[k] * W_real - Data_imag[k] * W_imag;
-        Temp_XX_imag = Data_real[k] * W_imag + Data_imag[k] * W_real;
+        Temp_XX_real = Data_real[k] * W_realAfter - Data_imag[k] * W_imagAfter;
+        Temp_XX_imag = Data_real[k] * W_imagAfter + Data_imag[k] * W_realAfter;
 
         Data_real[k] = Data_real[n] - Temp_XX_real;
         Data_imag[k] = Data_imag[n] - Temp_XX_imag;
@@ -336,6 +391,7 @@ void FFT(void){
         Data_real[n] = Data_real[n] + Temp_XX_real;
         Data_imag[n] = Data_imag[n] + Temp_XX_imag;
       }
+      W_Rotary_Position = W_Rotary_Position + W_Rotary_Amplitude; // 計算下一次W旋轉位置
     }
   }
 }
@@ -349,41 +405,43 @@ void Close_FFT(void){
   Finish = 0;
   for(count = 0; count < FFTN; count++){
     Data_real[count] = 0;
-    Data_imag[count] = 0;
+    Data_imag[count] = 0.0;
   }
 }
 
 /**
   * @brief 尋找FFT結果的第一個峰值，並計算聲音頻率
   * @param bin FFT結果
-  * @param binmax bin / 2陣列中最大值
-  * @param binmax_count 計數變數
-  * @param peakmax_count 計數變數
+  * @param binmax bin陣列中最大值
+  * @param bin_count 計數變數
+  * @param peak_count 計數變數
   * @param error 找尋peakmax_point + error個點，向後尋找更大的值
   * @param peakmax 儲存第一峰值的值，向後找到更大的值並替代原本的值
   * @param binvalve 以最大值binmax的binvalve倍尋找主頻率
-  * @param peakmax_point 儲存第一峰值的點，向後找到更大的值並替代原本的點
+  * @param point 設定迴圈變數
+  * @param peak_point 儲存第一峰值的點，向後找到更大的值並替代原本的點
   * @param peak 最終第一個峰值的點
   * @param freq 計算出的聲音頻率
   * @note 
 **/
 void Hz(void){
-  uint16_t binmax_count, peakmax_count, peakmax_point = 0;
-  uint16_t peak = 0;
+  uint16_t bin_countmin = 13, bin_countmax = 130, bin_count, peak_count;
+  uint16_t peak, peak_point;
   uint8_t error = 10;
-  float binvalve = 0.2;
-  float binmax, peakmax = 0;
-  for(binmax_count = 10; binmax_count <= (FFTN / 2); binmax_count++){  // Find the maximum value of bin
-    if(bin(binmax_count) > binmax)
-      binmax = bin(binmax_count);
+  float binvalve = 0.3;
+  float binmax = 0, peakmax = 0;
+  for(bin_count = bin_countmin; bin_count <= FFTN_half; bin_count++){
+    if(bin(bin_count) > binmax)
+      binmax = bin(bin_count);
   }
-  for(binmax_count = 10; binmax_count <= (FFTN / 2); binmax_count++){
-    if(bin(binmax_count) >= binmax * binvalve && bin(binmax_count) >= bin(binmax_count - 1)){ // Find the peak of bin
-      for(peakmax_count = 0; peakmax_count <= error; peakmax_count++){ // Find the 10 values after the bin peak
-        if(bin(binmax_count + peakmax_count) > peakmax){ 
-          peakmax = bin(binmax_count + peakmax_count); // Find the largest of the last 10 values and store it in the peakmax
-          peakmax_point = peakmax_count;
-          peak = binmax_count + peakmax_point;
+  for(bin_count = bin_countmin; bin_count <= bin_countmax; bin_count++){
+    if(bin(bin_count) >= binmax * binvalve && bin(bin_count) >= bin(bin_count - 1)){
+      for(peak_count = 0; peak_count <= error; peak_count++){
+        if(bin(bin_count + peak_count) > peakmax){ 
+          peakmax = bin(bin_count + peak_count);
+          peak_point = peak_count;
+          peak = bin_count + peak_point;
+          break;
         }
       }
       if(peak != 0)
@@ -395,19 +453,19 @@ void Hz(void){
 
 /**
   * @brief 確認聲音頻率是否在設定值內
-  * @param LowAudio 前八度音B
-  * @param AudioOne 目前八度音C
-  * @param AudioTwo 目前八度音B
-  * @param HighAudio 後八度音C
-  * @param Al 計算目前音名與前音名的中間
-  * @param Ah 計算目前音名與後音名的中間
+  * @param LowAudio 前八度音
+  * @param AudioOne 目前八度音
+  * @param AudioTwo 目前八度音
+  * @param HighAudio 後八度音
+  * @param Al 計算目前音名與前音名頻率的中間值
+  * @param Ah 計算目前音名與後音名頻率的中間值
   * @note 用於確認目前聲音頻率在哪個八度音區間
   * @retval true or false
 **/
 bool InRange(float LowAudio, float AudioOne, float AudioTwo, float HighAudio){
   float Al, Ah;
   Al = AudioOne - ((AudioOne - LowAudio) / 2.0);
-  Ah = AudioTwo + ((HighAudio - AudioTwo) / 2.0); 
+  Ah = AudioTwo + ((HighAudio - AudioTwo) / 2.0);
   if((freq > Al) && (freq < Ah))
     return true;
   else
@@ -441,7 +499,7 @@ void name_of_pitch(void){
 /*-----------------------------------------------------------------------------------------------------*/
   if(freq >= C[0] && freq < FU[2]){
     Cents = 1200 * log2(E[2] / freq);
-    if(Octave == 2 && Cents <= 20 && Cents >= -20){
+    if(Octave == 2 && Cents <= 25 && Cents >= -25){
       Finish = 1;
       ST7735_WriteString(120, 3, "E", Font_16x26, ST7735_GREEN, ST7735_PU);
       ST7735_WriteString(140, 7, "2", Font_11x18, ST7735_GREEN, ST7735_PU);
@@ -453,7 +511,7 @@ void name_of_pitch(void){
   }
   else if(freq >= FU[2] && freq < C[3]){
     Cents = 1200 * log2(A[2] / freq);
-    if(Octave == 2 && Cents <= 20 && Cents >= -20){
+    if(Octave == 2 && Cents <= 25 && Cents >= -25){
       Finish = 1;
       ST7735_WriteString(120, 3, "A", Font_16x26, ST7735_GREEN, ST7735_PU);
       ST7735_WriteString(140, 7, "2", Font_11x18, ST7735_GREEN, ST7735_PU);
@@ -465,7 +523,7 @@ void name_of_pitch(void){
   }
   else if(freq >= C[3] && freq < F[3]){
     Cents = 1200 * log2(D[3] / freq);
-    if(Octave == 3 && Cents <= 20 && Cents >= -20){
+    if(Octave == 3 && Cents <= 25 && Cents >= -25){
       Finish = 1;
       ST7735_WriteString(120, 3, "D", Font_16x26, ST7735_GREEN, ST7735_PU);
       ST7735_WriteString(140, 7, "3", Font_11x18, ST7735_GREEN, ST7735_PU);
@@ -477,7 +535,7 @@ void name_of_pitch(void){
   }
   else if(freq >= F[3] && freq < A[3]){
     Cents = 1200 * log2(G[3] / freq);
-    if(Octave == 3 && Cents <= 20 && Cents >= -20){
+    if(Octave == 3 && Cents <= 25 && Cents >= -25){
       Finish = 1;
       ST7735_WriteString(120, 3, "G", Font_16x26, ST7735_GREEN, ST7735_PU);
       ST7735_WriteString(140, 7, "3", Font_11x18, ST7735_GREEN, ST7735_PU);
@@ -488,8 +546,8 @@ void name_of_pitch(void){
     }
   }
   else if(freq >= A[3] && freq < D[4]){
-    Cents = 1200 * log2(A[3] / freq);
-    if(Octave == 3 && Cents <= 20 && Cents >= -20){
+    Cents = 1200 * log2(B[3] / freq);
+    if(Octave == 3 && Cents <= 25 && Cents >= -25){
       Finish = 1;
       ST7735_WriteString(120, 3, "B", Font_16x26, ST7735_GREEN, ST7735_PU);
       ST7735_WriteString(140, 7, "3", Font_11x18, ST7735_GREEN, ST7735_PU);
@@ -501,7 +559,7 @@ void name_of_pitch(void){
   }
   else if(freq >= D[4] && freq < B[7]){
     Cents = 1200 * log2(E[4] / freq);
-    if(Octave == 4 && Cents <= 20 && Cents >= -20){
+    if(Octave == 4 && Cents <= 25 && Cents >= -25){
       Finish = 1;
       ST7735_WriteString(120, 3, "E", Font_16x26, ST7735_GREEN, ST7735_PU);
       ST7735_WriteString(140, 7, "4", Font_11x18, ST7735_GREEN, ST7735_PU);
@@ -556,8 +614,6 @@ void name_of_pitch(void){
     else
       ST7735_WriteString(3, 3, " B", Font_16x26, ST7735_WHITE, ST7735_PU);
   }
-  else
-    ST7735_WriteString(3, 3, "--", Font_16x26, ST7735_WHITE, ST7735_PU);
 /*-----------------------------------------------------------------------------------------------------*/
   if(Octave == 0)
     ST7735_WriteString(35, 7, "0", Font_11x18, ST7735_WHITE, ST7735_PU);
@@ -583,10 +639,6 @@ void name_of_pitch(void){
   }
   else if(Octave == 5)
     ST7735_WriteString(35, 7, "5", Font_11x18, ST7735_WHITE, ST7735_PU);
-  else if(Octave == 6)
-    ST7735_WriteString(35, 7, "6", Font_11x18, ST7735_WHITE, ST7735_PU);
-  else if(Octave == 7)
-    ST7735_WriteString(35, 7, "7", Font_11x18, ST7735_WHITE, ST7735_PU);
 }
 
 /**
@@ -602,30 +654,32 @@ void name_of_pitch(void){
 void Tuner_Interfaz(void){
   int8_t count;
   uint8_t back_flag;
-  if(Cents >= -50 && Cents <= -45)
+  if(Cents < -50.0)
     schedule = -4;
-  else if(Cents > -45 && Cents <= -40)
+  else if(Cents >= -50.0 && Cents < -42.0)
     schedule = -3;
-  else if(Cents > -40 && Cents <= -30)
+  else if(Cents >= -42.0 && Cents < -34.0)
     schedule = -2;
-  else if(Cents > -30 && Cents <= -20)
+  else if(Cents >= -34.0 && Cents < -25.0)
     schedule = -1;
-  else if((Cents > -20 && Cents <= 20) || Finish == 1)
+  else if((Cents >= -25.0 && Cents <= 25.0) || Finish == 1)
     schedule = 0;
-  else if(Cents > 20 && Cents <= 30)
+  else if(Cents > 25.0 && Cents <= 34.0)
     schedule = 1;
-  else if(Cents > 30 && Cents <= 40)
+  else if(Cents > 34.0 && Cents <= 42.0)
     schedule = 2;
-  else if(Cents > 40 && Cents <= 45)
+  else if(Cents > 42.0 && Cents <= 50.0)
     schedule = 3;
-  else if(Cents > 45 && Cents <= 50)
+  else if(Cents > 50.0)
     schedule = 4;
 
   if(Old_schedule > schedule)
     back_flag = 1;
-  else
+  else if(Old_schedule < schedule)
     back_flag = 0;
-  
+  else
+    back_flag = 2;
+
   if(back_flag == 0){
     for(count = Old_schedule; count <= schedule; count++){
       switch(count){
@@ -827,12 +881,14 @@ int main(void)
   ST7735_Init(); // LCD螢幕初始化
   Interface(); // LCD載入初始背景
   Init_FFT(FFTN); // 初始化傅立葉變換的相關變量
+  // HAL_Delay(1000);
+  W_tabular();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-  {
+  { 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -845,7 +901,7 @@ int main(void)
       Tuner_Interfaz(); // 進度條顯示
     }
     Close_FFT(); // FFT結束後清空聲音資料
-	}
+  }
   /* USER CODE END 3 */
 }
 
@@ -1017,7 +1073,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -1227,13 +1283,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, CS_Pin|DC_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|CS_Pin|DC_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(RET_GPIO_Port, RET_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : CS_Pin DC_Pin */
-  GPIO_InitStruct.Pin = CS_Pin|DC_Pin;
+  /*Configure GPIO pins : PA0 CS_Pin DC_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|CS_Pin|DC_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

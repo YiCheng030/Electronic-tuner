@@ -1,7 +1,7 @@
 # Electronic-tuner
 
 # 硬體爆炸圖
-![image](https://github.com/YiCheng030/Electronic-tuner/blob/main/image/%E7%A1%AC%E9%AB%94%E7%88%86%E7%82%B8%E5%9C%96.png)
+![image]
 
 # 系統架構圖
 ![image](https://github.com/YiCheng030/Electronic-tuner/blob/main/image/%E7%B3%BB%E7%B5%B1%E6%9E%B6%E6%A7%8B%E5%9C%96.png)

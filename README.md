@@ -11,3 +11,9 @@
 
 # 韌體流程圖
 ![image](https://github.com/YiCheng030/Electronic-tuner/blob/main/image/%E9%9F%8C%E9%AB%94%E6%B5%81%E7%A8%8B%E5%9C%96.png)
+
+# PCB
+![image](https://github.com/YiCheng030/Electronic-tuner/blob/main/image/G431%20PCB%20Top.png)
+
+# 成品圖
+![image](https://github.com/YiCheng030/Electronic-tuner/blob/main/image/%E6%88%90%E5%93%81%E5%9C%96.png)
